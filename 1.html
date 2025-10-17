@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Peer-to-Peer Encrypted Chat (no server)</title>
+<style>
+  :root { --bg:#fff; --text:#111; --card:#f6f6f6; --accent:#1976d2; }
+  [data-theme="dark"] { --bg:#0f1113; --text:#e6eef6; --card:#101319; --accent:#90caf9; }
+  body { background:var(--bg); color:var(--text); font-family:system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding:16px; max-width:980px; margin:auto; }
+  h1 { margin:0 0 8px 0; font-size:20px; }
+  .grid { display:grid; grid-template-columns:1fr; gap:12px; }
+  .card { background:var(--card); padding:12px; border-radius:10px; box-shadow:0 1px 0 rgba(0,0,0,0.03); }
+  label { display:block; font-size:13px; margin:6px 0 2px; }
+  input[type="text"], textarea { width:100%; padding:8px; border-radius:8px; border:1px solid rgba(0,0,0,0.12); box-sizing:border-box; background:transparent; color:var(--text); }
+  textarea { min-height:90px; resize:vertical; }
+  button { background:var(--accent); color:white; border:none; padding:8px 10px; border-radius:8px; cursor:pointer; margin-top:6px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .small { font-size:12px; color:rgba(0,0,0,0.6); }
+  #messages { height:300px; overflow:auto; padding:8px; border-radius:8px; border:1px solid rgba(0,0,0,0.06); background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent); }
+  .msg { padding:6px 8px; margin:6px 0; border-radius:8px; background:rgba(0,0,0,0.03); }
+  .msg.you { background:rgba(30,120,210,0.12); }
+  .meta { font-size:11px; color:rgba(0,0,0,0.45); margin-bottom:4px; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; }
+  .muted { color:rgba(0,0,0,0.45); font-size:12px; }
+  @media(min-width:900px){ .grid { grid-template-columns: 360px 1fr; } }
+</style>
+</head>
+<body data-theme="light">
+  <h1>Peer-to-Peer Encrypted Chat — No Server</h1>
+  <div class="grid">
+    <div class="card">
+      <div class="small muted">Security: messages are encrypted locally using AES-GCM with a key derived from passcode + room. You must share the passcode & room with peers.</div>
+
+      <label>Passcode</label>
+      <input id="pass" type="text" value="JARx_190_563208" />
+
+      <label>Room name</label>
+      <input id="room" type="text" value="main" />
+
+      <label>Nickname</label>
+      <input id="nick" type="text" value="guest" />
+
+      <div class="row">
+        <label style="margin-right:auto"><input id="darkToggle" type="checkbox"> Dark theme</label>
+      </div>
+
+      <hr />
+
+      <div>
+        <strong>Create room (host)</strong>
+        <div class="muted">Host generates an Offer SDP. Give the Offer text to each joiner. When a joiner returns an Answer, paste it below and click Accept Answer to complete that peer connection.</div>
+        <div class="controls">
+          <button id="createOfferBtn">Create Offer</button>
+          <button id="copyOfferBtn">Copy Offer</button>
+        </div>
+        <label>Local Offer (share with joiner)</label>
+        <textarea id="localOffer" placeholder="Offer will appear here"></textarea>
+
+        <label>Remote Answer (paste joiner's Answer here)</label>
+        <textarea id="remoteAnswer" placeholder="Paste Answer SDP from joiner"></textarea>
+        <div class="controls"><button id="acceptAnswerBtn">Accept Answer</button></div>
+      </div>
+
+      <hr />
+
+      <div>
+        <strong>Join room (joiner)</strong>
+        <div class="muted">Paste host's Offer below, click Create Answer, then copy the Answer and send it back to the host.</div>
+        <label>Remote Offer (paste host offer)</label>
+        <textarea id="remoteOffer" placeholder="Paste host Offer SDP here"></textarea>
+        <div class="controls">
+          <button id="createAnswerBtn">Create Answer</button>
+          <button id="copyAnswerBtn">Copy Answer</button>
+        </div>
+        <label>Local Answer (give this to host)</label>
+        <textarea id="localAnswer" placeholder="Answer will appear here"></textarea>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; gap:8px; align-items:center; justify-content:space-between;">
+        <div>
+          <label class="small">Connected peers: <span id="peersCount">0</span></label>
+        </div>
+        <div>
+          <button id="clearBtn" style="background:#e53935">Clear local messages</button>
+        </div>
+      </div>
+
+      <div id="messages" aria-live="polite"></div>
+
+      <div style="margin-top:8px;">
+        <label>Type message</label>
+        <div style="display:flex; gap:8px;">
+          <input id="msgInput" type="text" placeholder="Write a message..." />
+          <button id="sendBtn">Send</button>
+        </div>
+        <div class="muted" style="margin-top:8px">Messages older than 1 hour are automatically removed locally. Peers also prune old messages they receive.</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(async function(){
+  // --- Config / STUN ---
+  const STUN = { urls: ["stun:stun.l.google.com:19302"] };
+
+  // --- DOM ---
+  const passEl = document.getElementById('pass');
+  const roomEl = document.getElementById('room');
+  const nickEl  = document.getElementById('nick');
+  const darkToggle = document.getElementById('darkToggle');
+  const createOfferBtn = document.getElementById('createOfferBtn');
+  const copyOfferBtn = document.getElementById('copyOfferBtn');
+  const acceptAnswerBtn = document.getElementById('acceptAnswerBtn');
+  const createAnswerBtn = document.getElementById('createAnswerBtn');
+  const copyAnswerBtn = document.getElementById('copyAnswerBtn');
+  const localOfferTA = document.getElementById('localOffer');
+  const remoteOfferTA = document.getElementById('remoteOffer');
+  const localAnswerTA = document.getElementById('localAnswer');
+  const remoteAnswerTA = document.getElementById('remoteAnswer');
+  const messagesDiv = document.getElementById('messages');
+  const msgInput = document.getElementById('msgInput');
+  const sendBtn = document.getElementById('sendBtn');
+  const peersCount = document.getElementById('peersCount');
+  const clearBtn = document.getElementById('clearBtn');
+
+  // --- State ---
+  let pcs = []; // active RTCPeerConnections
+  let dataChannels = []; // corresponding DataChannels
+  let derivedKey = null;
+  let myNick = nickEl.value || 'guest';
+  let myRoom = roomEl.value || 'main';
+  const PASS_REQUIRED = "JARx_190_563208";
+
+  // messages stored locally with timestamp to auto-delete
+  let localMessages = []; // {id, from, text, ts, local}
+
+  // --- theme toggle ---
+  darkToggle.addEventListener('change', () => {
+    document.documentElement.setAttribute('data-theme', darkToggle.checked ? 'dark' : 'light');
+  });
+
+  // small helpers
+  function uid() { return Math.random().toString(36).slice(2,10); }
+  function now() { return Date.now(); }
+  function appendMsgEl(m) {
+    pruneLocal(); // maintain
+    const el = document.createElement('div');
+    el.className = 'msg' + (m.local ? ' you' : '');
+    el.innerHTML = `<div class="meta">${escapeHtml(m.from)} • ${new Date(m.ts).toLocaleTimeString()}</div><div>${escapeHtml(m.text)}</div>`;
+    messagesDiv.appendChild(el);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  }
+  function renderAll() {
+    messagesDiv.innerHTML = '';
+    localMessages.forEach(appendMsgEl);
+    peersCount.textContent = dataChannels.length.toString();
+  }
+
+  function escapeHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // --- crypto: derive key from pass + room ---
+  async function deriveKey(pass, room) {
+    const enc = new TextEncoder();
+    const passKey = await crypto.subtle.importKey('raw', enc.encode(pass), {name:'PBKDF2'}, false, ['deriveKey']);
+    const salt = enc.encode(room);
+    const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:200000, hash:'SHA-256'}, passKey, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+    return key;
+  }
+
+  function bufToB64(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))); }
+  function b64ToBuf(b64){ return Uint8Array.from(atob(b64), c=>c.charCodeAt(0)); }
+
+  async function encryptText(key, text){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const enc = new TextEncoder();
+    const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(text));
+    return {cipher: bufToB64(ct), iv: bufToB64(iv)};
+  }
+  async function decryptText(key, cipherB64, ivB64){
+    try {
+      const ct = b64ToBuf(cipherB64);
+      const iv = b64ToBuf(ivB64);
+      const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv}, key, ct);
+      return new TextDecoder().decode(pt);
+    } catch { return null; }
+  }
+
+  // --- local persistence & pruning (remove messages older than 1 hour) ---
+  function pruneLocal() {
+    const hour = 60*60*1000;
+    const cutoff = now() - hour;
+    localMessages = localMessages.filter(m => m.ts >= cutoff);
+  }
+  setInterval(() => { pruneLocal(); renderAll(); }, 30*1000);
+
+  // add local message and show
+  function addLocalMessage(from, text, local=false) {
+    const m = { id: uid(), from, text, ts: now(), local };
+    localMessages.push(m);
+    pruneLocal();
+    appendMsgEl(m);
+  }
+
+  // --- WebRTC helpers (single-shot non-trickle ICE gathering to embed ICE in SDP) ---
+  async function gatherComplete(pc) {
+    // wait until ICE gathering state becomes 'complete'
+    if (pc.iceGatheringState === 'complete') return;
+    await new Promise(resolve => {
+      function check(e) {
+        if (pc.iceGatheringState === 'complete') {
+          pc.removeEventListener('icegatheringstatechange', check);
+          resolve();
+        }
+      }
+      pc.addEventListener('icegatheringstatechange', check);
+    });
+  }
+
+  // create RTCPeerConnection + DataChannel (for host) or accept remoteOffer (for joiner)
+  async function createHostConnection() {
+    const pc = new RTCPeerConnection({iceServers:[STUN]});
+    const dc = pc.createDataChannel('chat', {ordered:true});
+    setupDataChannel(dc);
+    pcs.push(pc); dataChannels.push(dc); updatePeersCount();
+
+    pc.onicecandidate = e => {
+      // no-op; we wait for gatheringComplete before exporting SDP
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        // cleanup
+      }
+    };
+    return {pc, dc};
+  }
+
+  function setupDataChannel(dc) {
+    dc.onopen = () => {
+      console.log('DataChannel open');
+      updatePeersCount();
+      // send a hello including room/pass derived identity so peers can check
+      sendControl({type:'hello', room:roomEl.value, nick:nickEl.value});
+    };
+    dc.onmessage = async (ev) => {
+      try {
+        const obj = JSON.parse(ev.data);
+        await handleIncoming(obj, dc);
+      } catch (e) {
+        console.warn('msg parse', e);
+      }
+    };
+    dc.onclose = () => { updatePeersCount(); };
+  }
+
+  async function handleIncoming(obj, dc) {
+    if (obj.type === 'chat') {
+      // {type:'chat', cipher, iv, from, ts}
+      const maybe = await decryptText(derivedKey, obj.cipher, obj.iv);
+      const text = maybe === null ? '[cannot-decrypt]' : maybe;
+      // skip if outdated
+      if (now() - obj.ts > 60*60*1000) return;
+      addLocalMessage(obj.from, text, false);
+    } else if (obj.type === 'hello') {
+      // optional: check room matches and passcode validation is implicit via decrypt success later
+      // No action needed.
+    } else if (obj.type === 'prune') {
+      // peer asks to prune local messages older than 1 hr (we already prune)
+      pruneLocal(); renderAll();
+    }
+  }
+
+  function updatePeersCount() {
+    peersCount.textContent = dataChannels.length.toString();
+  }
+
+  // --- signaling UI actions ---
+  // Host creates offer and shows SDP after ICE complete
+  createOfferBtn.addEventListener('click', async () => {
+    // passcode check
+    if (passEl.value.trim() !== PASS_REQUIRED) { alert('Wrong passcode'); return; }
+    myNick = nickEl.value || 'guest'; myRoom = roomEl.value || 'main';
+    derivedKey = await deriveKey(passEl.value, myRoom);
+
+    const {pc, dc} = await createHostConnection();
+    const offer = await pc.createOffer({offerToReceiveAudio:false, offerToReceiveVideo:false});
+    await pc.setLocalDescription(offer);
+    // wait ICE gathering
+    await gatherComplete(pc);
+    const sdp = pc.localDescription.sdp;
+    localOfferTA.value = sdp;
+    copyToClipboard(localOfferTA);
+    alert('Offer created and copied. Give it to joiner. When they return an Answer, paste it into Remote Answer and click Accept Answer.');
+  });
+
+  copyOfferBtn.addEventListener('click', () => copyToClipboard(localOfferTA));
+
+  // Host accepts an answer (paste joiner's answer then click)
+  acceptAnswerBtn.addEventListener('click', async () => {
+    const ans = remoteAnswerTA.value.trim();
+    if (!ans) return alert('Paste the Answer SDP from a joiner first.');
+    // create new RTCPeerConnection to pair with that joiner's answer (we created host pc when creating offer)
+    // For simplicity, we find a pc that has localDescription == the offer we showed (matching by sdp snippet)
+    const targetPC = pcs.find(p=>p.localDescription && p.localDescription.sdp === localOfferTA.value);
+    if (!targetPC) return alert('No matching host offer found (create offer first).');
+    try {
+      await targetPC.setRemoteDescription({type:'answer', sdp: ans});
+      // ready
+      remoteAnswerTA.value = '';
+      alert('Answer accepted — peer should connect soon.');
+    } catch (e) {
+      console.error(e); alert('Failed to set remote answer: ' + e.message);
+    }
+  });
+
+  // Joiner creates answer after pasting host offer
+  createAnswerBtn.addEventListener('click', async () => {
+    if (passEl.value.trim() !== PASS_REQUIRED) { alert('Wrong passcode'); return; }
+    myNick = nickEl.value || 'guest'; myRoom = roomEl.value || 'main';
+    derivedKey = await deriveKey(passEl.value, myRoom);
+
+    const remoteOffer = remoteOfferTA.value.trim();
+    if (!remoteOffer) return alert('Paste host offer first.');
+
+    // create PC and set remote offer
+    const pc = new RTCPeerConnection({iceServers:[STUN]});
+    pcs.push(pc);
+    pc.ondatachannel = ev => {
+      const dc = ev.channel;
+      setupDataChannel(dc);
+      dataChannels.push(dc);
+      updatePeersCount();
+    };
+    try {
+      await pc.setRemoteDescription({type:'offer', sdp: remoteOffer});
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await gatherComplete(pc);
+      // export answer
+      localAnswerTA.value = pc.localDescription.sdp;
+      copyToClipboard(localAnswerTA);
+      alert('Answer created and copied — send it to the host.');
+    } catch (e) {
+      console.error(e); alert('Error creating answer: ' + e.message);
+    }
+  });
+
+  copyAnswerBtn.addEventListener('click', () => copyToClipboard(localAnswerTA));
+
+  // util: copy textarea content
+  function copyToClipboard(el) {
+    el.select();
+    document.execCommand('copy');
+  }
+
+  // send chat message (encrypt before send)
+  sendBtn.addEventListener('click', async () => {
+    const text = msgInput.value.trim();
+    if (!text) return;
+    if (!derivedKey) {
+      alert('You must create or accept connection first and ensure passcode+room are correct.');
+      return;
+    }
+    const {cipher, iv} = await encryptText(derivedKey, text);
+    const payload = JSON.stringify({type:'chat', cipher, iv, from: nickEl.value || 'guest', ts: now()});
+    // send over all channels
+    dataChannels.forEach(dc => { if (dc.readyState === 'open') try { dc.send(payload); } catch(e){} });
+    addLocalMessage(nickEl.value || 'guest', text, true);
+    msgInput.value = '';
+  });
+
+  // Accept multiple answers: if host wants to create multiple offers for separate peers,
+  // they should click Create Offer again (it creates a new pc+dc), share that offer and repeat the flow.
+  // Clear local messages
+  clearBtn.addEventListener('click', () => { localMessages = []; renderAll(); });
+
+  // When a new DataChannel is open, ensure our prune is sent occasionally
+  setInterval(() => {
+    // prune and notify peers to prune
+    pruneLocal();
+    renderAll();
+    const payload = JSON.stringify({type:'prune'});
+    dataChannels.forEach(dc => { if (dc.readyState === 'open') try { dc.send(payload); } catch(e) {} });
+  }, 60*1000);
+
+  // update peers count periodically
+  setInterval(updatePeersCount, 2000);
+
+  // attempt to paste from clipboard into remoteOffer (helper)
+  // optional: attempt to auto-detect pasted SDP (not necessary)
+
+  // initial UI render
+  renderAll();
+
+  // End IIFE
+})();
+</script>
+</body>
+</html>
